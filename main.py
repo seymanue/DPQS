@@ -36,6 +36,32 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+# =========================
+# GRAFIK TASARIM STANDARTLARI
+# =========================
+plt.rcParams.update({
+    "figure.figsize": (11, 6),
+    "figure.facecolor": "#FFFFFF",
+    "axes.facecolor": "#FFFFFF",
+    "axes.edgecolor": "#D1D5DB",
+    "axes.linewidth": 0.8,
+    "axes.grid": True,
+    "grid.color": "#E5E7EB",
+    "grid.linestyle": "--",
+    "grid.linewidth": 0.7,
+    "axes.axisbelow": True,
+    "axes.titlesize": 14,
+    "axes.titleweight": "bold",
+    "axes.labelsize": 11,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 9,
+    "lines.linewidth": 2.5,
+    "lines.markersize": 7,
+    "savefig.dpi": 200,
+})
+
+
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 

@@ -1,4 +1,11 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+
+# macOS
 .DS_Store
+
+# Backups
+eski_yedekler/
+png_yedek/
