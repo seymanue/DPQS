@@ -77,7 +77,8 @@ PROCESS_COUNT = 120
 RANDOM_SEED = 42
 CONTEXT_SWITCH_COST = 1
 AGING_THRESHOLD = 150
-# Açlık eşiği, her simülasyonun toplam süresinin %30'u olarak hesaplanır.
+LONG_WAIT_THRESHOLD = 150
+# Uzun bekleme riski karşılaştırması için tüm algoritmalarda ortak eşik kullanılır.
 
 ReadyStore = Union[Deque["Process"], List["Process"], List[Deque["Process"]]]
 
@@ -339,22 +340,36 @@ def simulate(
     def promote_aged_mlfq() -> None:
         if algorithm != "MLFQ":
             return
-        queues = ready  # three FIFO queues
-        # Move each eligible process up one level; no process can move more than one
-        # level during a single tick.
+
+        queues = ready
+
+        # Her tikte süreçler yalnızca mevcut kuyruk seviyelerinde değerlendirilir.
+        promoted_to_level1 = []
+        promoted_to_level0 = []
+
         for level in (2, 1):
             q = queues[level]
             keep = deque()
+
             while q:
                 p = q.popleft()
+
                 if p.ready_wait_current >= AGING_THRESHOLD:
                     p.queue_level = level - 1
-                    # Aging changes queue level, but does not end the continuous wait.
                     p.enqueue_order = enqueue_counter + p.pid
-                    queues[level - 1].append(p)
+
+                    if level == 2:
+                        promoted_to_level1.append(p)
+                    else:
+                        promoted_to_level0.append(p)
                 else:
                     keep.append(p)
+
             queues[level] = keep
+
+        # Yükseltilen süreçler değerlendirme bittikten sonra eklenir.
+        queues[1].extend(promoted_to_level1)
+        queues[0].extend(promoted_to_level0)
 
     def advance_tick(is_cpu: bool = False) -> None:
         nonlocal now, cpu_ticks
@@ -401,9 +416,9 @@ def simulate(
                 else:
                     context_switches += 1
 
-            # Arrivals and MLFQ aging may change the best candidate during
-            # context-switch overhead, so choose again immediately before dispatch.
-            selected = choose_ready(ready, algorithm)
+            # Keep the selected process fixed during context-switch overhead.
+            # Arrivals and aging are processed during the overhead, but they do
+            # not change which process this switch is preparing to dispatch.
             remove_ready(ready, algorithm, selected)
             selected.ready_wait_current = 0
             current = selected
@@ -461,9 +476,11 @@ def simulate(
     elapsed = now
     wall_ms = (time.perf_counter() - started) * 1000.0
 
-    # Sabit 50 tick eşiği yoğun iş yüklerinde neredeyse tüm süreçleri
-    # aç kalmış gösteriyordu. Eşik artık simülasyon süresine göre ölçeklenir.
-    starvation_threshold = max(100, round(elapsed * 0.30))
+    # Uzun bekleme riski tüm algoritmalarda aynı sabit eşikle ölçülür;
+    # böylece algoritmalar arası karşılaştırma adil olur.
+    # CPU kullanım metriği yalnızca faydalı süreç yürütme ticklerini sayar;
+    # context switch overhead ayrı bir metrik olarak raporlanır.
+    starvation_threshold = LONG_WAIT_THRESHOLD
 
     result = Result(
         scenario=scenario,
@@ -500,12 +517,12 @@ def simulate(
             "Toplam CPU Suresi": p.total_cpu_time,
             "Bekleme Suresi": p.waiting_time,
             "Maksimum Kesintisiz Hazir Bekleme": p.max_ready_wait,
-            "Starvation (30% toplam sure)": p.max_ready_wait >= starvation_threshold,
+            "Uzun Bekleme Riski (esik)": p.max_ready_wait >= starvation_threshold,
             "Acilik Esigi (tick)": starvation_threshold,
             "Tamamlanma Zamani": p.completion_time,
             "Turnaround": p.completion_time - p.arrival_time,
             "Yanit Suresi": p.response_time,
-            "Verimlilik (CPU/Bekleme)": (
+            "Toplam CPU/Bekleme Orani": (
                 round(p.total_cpu_time / p.waiting_time, 4)
                 if p.waiting_time > 0 else "Tanimsiz (bekleme 0)"
             ),
@@ -521,14 +538,14 @@ def aggregate_row(r: Result) -> dict:
         "Ortalama Bekleme (tick)": round(r.avg_waiting, 3),
         "Ortalama Tamamlanma (tick)": round(r.avg_turnaround, 3),
         "Ortalama Yanit (tick)": round(r.avg_response, 3),
-        "Ortalama Verimlilik (CPU/Bekleme)": round(r.avg_efficiency, 4),
+        "Toplam CPU/Bekleme Orani": round(r.avg_efficiency, 4),
         "Baglam Degistirme Sayisi": r.context_switches,
         "Baglam Degistirme Maliyeti (tick)": r.context_switch_time,
-        "CPU Kullanimi (%)": round(r.cpu_utilization, 2),
+        "CPU Is Yuku (%)": round(r.cpu_utilization, 2),
         "Verim (surec/tick)": round(r.throughput, 5),
         "En Uzun Bekleme (tick)": r.max_waiting,
         "Acilik Esigi (tick)": r.starvation_threshold,
-        "Starvation Sayisi (kesintisiz hazir bekleme >= esik)": r.starvation_count,
+        "Uzun Bekleme Riski Sayisi": r.starvation_count,
         "CPU-bound Bekleme": round(r.cpu_bound_wait, 3),
         "I/O-bound Bekleme": round(r.io_bound_wait, 3),
         "Toplam Simulasyon (tick)": r.elapsed_ticks,
@@ -599,8 +616,8 @@ def create_graphs(results: List[Result], seed: int) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
     for s in active_scenarios:
         ax.plot(ALGORITHMS, [find_result(results, s, a).cpu_utilization for a in ALGORITHMS], marker="o", label=s)
-    ax.set_title("4. CPU Kullanım Oranı")
-    ax.set_ylabel("%")
+    ax.set_title("4. Faydalı CPU İş Yükü (Context Switch Hariç)")
+    ax.set_ylabel("% (context switch hariç)")
     ax.set_ylim(0, 105)
     ax.legend(fontsize=8)
     save_plot("04_cpu_kullanimi.png")
@@ -613,7 +630,7 @@ def create_graphs(results: List[Result], seed: int) -> None:
     ax.bar([i - width / 2 for i in x], [find_result(results, sample, a).cpu_bound_wait for a in ALGORITHMS], width, label="CPU-bound")
     ax.bar([i + width / 2 for i in x], [find_result(results, sample, a).io_bound_wait for a in ALGORITHMS], width, label="I/O-bound")
     ax.set_xticks(x, ALGORITHMS)
-    ax.set_title("5. Süreç Türüne Göre Ortalama Bekleme")
+    ax.set_title(f"5. Süreç Türüne Göre Ortalama Bekleme ({sample})")
     ax.set_ylabel("Tick")
     ax.legend()
     save_plot("05_surec_turune_gore_bekleme.png")
@@ -664,9 +681,9 @@ def print_summary(results: List[Result]) -> None:
             print(
                 f"{a:12} | Bekleme: {r.avg_waiting:8.2f} | "
                 f"Turnaround: {r.avg_turnaround:8.2f} | "
-                f"CPU: %{r.cpu_utilization:6.2f} | "
+                f"CPU Is Yuku: %{r.cpu_utilization:6.2f} | "
                 f"Context switch: {r.context_switches:4d} | "
-                f"Verimlilik: {r.avg_efficiency:7.3f}"
+                f"Toplam CPU/Bekleme Orani: {r.avg_efficiency:7.3f}"
             )
     print(f"\nCSV dosyaları ve grafikler {RESULTS.name}/ klasörüne kaydedildi.")
 
@@ -687,12 +704,12 @@ def print_process_details(details: List[dict]) -> None:
         print(
             f"{'PID':>4} {'Tür':<10} {'Öncelik':>8} {'CPU':>7} "
             f"{'Bekleme':>10} {'Max Hazır':>10} {'Starve':>7} "
-            f"{'Tamamlanma':>12} {'Turnaround':>12} {'Yanıt':>8} {'Verimlilik':>12}"
+            f"{'Tamamlanma':>12} {'Turnaround':>12} {'Yanıt':>8} {'Toplam CPU/Bekleme Orani':>12}"
         )
         print("-" * 118)
         table_lines = []
         for row in sorted(rows, key=lambda item: int(item["PID"])):
-            efficiency = row["Verimlilik (CPU/Bekleme)"]
+            efficiency = row["Toplam CPU/Bekleme Orani"]
             table_lines.append(
                 f"{int(row['PID']):>4} "
                 f"{row['Surec Turu']:<10} "
@@ -700,7 +717,7 @@ def print_process_details(details: List[dict]) -> None:
                 f"{row['Toplam CPU Suresi']:>7} "
                 f"{row['Bekleme Suresi']:>10} "
                 f"{row['Maksimum Kesintisiz Hazir Bekleme']:>10} "
-                f"{'EVET' if row['Starvation (30% toplam sure)'] else 'HAYIR':>7} "
+                f"{'EVET' if row['Uzun Bekleme Riski (esik)'] else 'HAYIR':>7} "
                 f"{row['Tamamlanma Zamani']:>12} "
                 f"{row['Turnaround']:>12} "
                 f"{row['Yanit Suresi']:>8} "
